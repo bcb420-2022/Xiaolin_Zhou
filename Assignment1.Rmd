@@ -1,0 +1,497 @@
+---
+title: 'BCB420 Assignment1: Data set selection and initial processing'
+output:
+  html_document:
+    df_print: paged
+---
+
+### Select an Expression Data Set:
+<br>
+**1. Install and load the `GEOmetadb` from Bioconductor as well as all packages needed in this assignment:**
+
+```{r message=FALSE, results=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)){
+  install.packages("BiocManager")
+  }
+if (!requireNamespace("GEOmetadb", quietly = TRUE)){
+  BiocManager::install("GEOmetadb")
+  }
+library(GEOmetadb)
+
+#install and load all packages need in A1
+if (!requireNamespace('knitr', quietly = TRUE)){
+install.packages('knitr', dependencies = TRUE)}
+library(knitr)
+
+if (!requireNamespace("magrittr", quietly = TRUE)){
+install.packages("magrittr")}
+library(magrittr) # needs to be run every time you start R and want to use %>%
+
+if (!requireNamespace("kableExtra", quietly = TRUE)){
+install.packages("kableExtra")}
+library(kableExtra)
+
+if (!requireNamespace("ggplot2", quietly = TRUE)){
+install.packages("ggplot2")}
+library(ggplot2)
+```
+
+**2. Find all RNASeq data for human cells or tissue and pull the data with SQL query:**
+```{r message=FALSE, results=FALSE}
+if(!file.exists('GEOmetadb.sqlite')){
+  GEOmetadb::getSQLiteFile()}
+file.info('GEOmetadb.sqlite')
+
+#Connect to our newly downloaded GEO meta data database
+con <- dbConnect(SQLite(), 'GEOmetadb.sqlite')
+
+#check tables that are available
+geo_tables <- dbListTables(con)
+geo_tables
+
+#Look at the details of an individual table
+dbListFields(con,'gse')
+
+#Run SQL queries
+results <- dbGetQuery(con,'select * from gpl limit 5')
+knitr::kable(head(results[,1:5]), format = "html")
+
+#return how many platforms in db
+num_platforms <- dbGetQuery(con,'select count(*) from gpl')
+
+#What other information can we get from the GPL table?
+dbListFields(con,'gpl')
+#How many different unique technologies are there?
+uniq_tech <- dbGetQuery(con,'select distinct technology from gpl')
+nrow(uniq_tech)
+
+#create table with two columns so that all data fit on the slide
+ mod_table <- cbind(uniq_tech[1:(nrow(uniq_tech)/2),1],
+       uniq_tech[((nrow(uniq_tech)/2)+1):nrow(uniq_tech),1])
+knitr::kable( mod_table, format = "html")
+
+#Hom many platforms are associated with each of those technologies?
+num_uniq_tech <- dbGetQuery(con,'select technology,count(*) from gpl')
+colnames(num_uniq_tech)[2] <- "Num_Platforms"
+
+#print it out as a table
+plot_df <- num_uniq_tech[!is.na(num_uniq_tech$technology),]
+p<-ggplot(data=plot_df, aes(technology, Num_Platforms)) +
+  geom_col() + coord_flip()
+
+#Find an RNAseq data realted to huamn cells or tissue that you are interested in
+sql <- paste("SELECT DISTINCT gse.title,gse.gse, gpl.title,",
+             " gse.submission_date",
+             "FROM",
+             "  gse JOIN gse_gpl ON gse_gpl.gse=gse.gse",
+             "  JOIN gpl ON gse_gpl.gpl=gpl.gpl",
+             "WHERE",
+             "  gse.submission_date > '2015-01-01' AND",
+             "  gpl.organism LIKE '%Homo sapiens%' AND",
+             "  gpl.technology LIKE '%high-throughput seq%' ",
+             sep=" ")
+rs <- dbGetQuery(con,sql)
+#Show all results that meet the requirements
+rs
+```
+
+**3. Find the RNASeq data that you are interested in:** 
+<br />
+  -  Selected dataset = [GSE160792](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE160792)
+  <br />
+  -  Related publication: Expanding the transcriptomic sequence space in leukaemia by RUNX1/RUNX1T1-mediated alternative splicing. Article number: [520 (2021)](https://doi.org/10.1038/s41467-020-20848-z)
+ 
+---
+
+### Clean the data and map to HUGO symbols:
+<br>
+**1. Download the data with supplementary files:**
+```{r message=FALSE, results=FALSE}
+sfiles = getGEOSuppFiles('GSE160792')
+fnames = rownames(sfiles)
+# there are two supplemental files
+s1_EEJs = read.delim(fnames[1], header=TRUE)
+head(s1_EEJs)
+s2_gene_counts = read.delim(fnames[2], header=TRUE)
+head(s2_gene_counts)
+dim(s2_gene_counts) #[1] 39262    10
+#Data Explore
+#First things first get the GEO description of your dataset.
+gse <- getGEO("GSE160792",GSEMatrix=FALSE)
+kable(data.frame(head(Meta(gse))), format = "html")
+#Information about Platform 
+current_gpl <- names(GPLList(gse))[1]
+current_gpl_info <- Meta(getGEO(current_gpl))
+current_gpl_info$title
+current_gpl_info$last_update_date
+current_gpl_info$organism
+
+#get expression data
+sfiles = getGEOSuppFiles('GSE160792')
+fnames = rownames(sfiles)
+# there is only one supplemental file
+kas_exp = read.delim(fnames[2],header=TRUE,
+                check.names = FALSE)
+#How many genes do we have measurements for?
+dim(kas_exp)
+#[1] 39262    10
+```
+
+    -_Interpretation_:
+       - There are 39262 rows of ensembl ids with gene id, gene symbols, gene name, exon cluster size, and 10 columns of samples (3 replicates in 2 conditions).
+       - There are **39262** genes with **3** samples
+       - Two treatments are applied to 3 samples of Kasumi-1 cells: siRR and siMM
+       - **3** replicates were tested in this experiment 
+<br>
+
+**2. Assess the data set and identify duplicates:**
+
+```{r message=FALSE, results=FALSE}
+#get columns
+colnames(kas_exp)
+#get the 2 and third token from the column names
+samples <- data.frame(lapply(colnames(kas_exp)[5:10], FUN=function(x){unlist(strsplit(x, split = "\\_"))[c(2,3)]}))
+colnames(samples) <- colnames(kas_exp)[5:10]
+rownames(samples) <- c("Treated_cell_type","Replicate")
+samples <- data.frame(t(samples))
+
+#Find duplicate genes
+summarized_gene_counts <- sort(table(kas_exp$gene_symbol),
+                               decreasing = TRUE)
+kable(table(kas_exp$gene_symbol)[1:3], format="html")
+#Only output those that are greater than 1
+kable(summarized_gene_counts[which(summarized_gene_counts>1)[1:10]],format="html")
+#Do not filter then at this point(avoid collapse)
+```
+
+**3. Filtering out genes with low counts:**
+```{r message=FALSE, results=FALSE}
+#translate out counts into counts per million using the edgeR package
+BiocManager::install("edgeR")
+library(edgeR)
+
+cpms = cpm(kas_exp[,5:10]) #get counts per million
+rownames(cpms) <- kas_exp[,1]
+# get rid of low counts
+keep = rowSums(cpms >1) >=3 #keep the rows where their counts per million greater than 1
+kas_exp_filtered = kas_exp[keep,]
+dim(kas_exp_filtered) #The number of genes after filtering out the low counts: [1] 21953    10
+
+#Does that solve some of duplicate issues? - Yes, background noise was reduced.
+length(unique(kas_exp_filtered$gene_id)) # 21953 - No duplication ensemble id
+summarized_gene_counts_filtered <- sort(table(kas_exp_filtered$gene_symbol),
+                               decreasing = TRUE)
+kable(summarized_gene_counts_filtered[which(summarized_gene_counts>1)[1:10]],format="html")
+
+```
+  - Note: Compared with `kas_exp` (39262 genes), `kas_exp_filtered` has **21953** genes after filtering out genes with low counts.
+<br>
+  
+
+
+**4. Map to HUGO gene symbols:**
+```{r message=FALSE, results=FALSE}
+#mapping
+library(biomaRt)
+#Connect to the desired mart
+ensembl <- useMart("ensembl")
+#Get the set of datasets available + Limit to the human datasets available
+datasets <- listDatasets(ensembl)
+kable(head(datasets[grep(datasets$dataset, pattern = "sapiens"),]),format = "html")
+ensembl = useDataset("hsapiens_gene_ensembl",mart=ensembl)
+#convert Human Ensembl Gene Ids to HGNC symbols
+biomart_human_filters <- listFilters(ensembl)
+kable(biomart_human_filters[
+  grep(biomart_human_filters$name,pattern="ensembl"),],
+      format="html") %>%
+  row_spec(3, background = "yellow")
+#find hgnc symbol
+kable(searchAttributes(mart = ensembl, 'hgnc') , format="html") %>%
+  row_spec(2, background = "yellow")
+
+#check to see if kas_id_conversion file exists
+conversion_stash <- "kas_id_conversion.rds" 
+if(file.exists(conversion_stash)){kas_id_conversion <- readRDS(conversion_stash) 
+} else{
+  kas_id_conversion <- biomaRt::getBM(attributes = c("ensembl_gene_id","hgnc_symbol"),
+                            filters = c("ensembl_gene_id"),
+                            values = kas_exp_filtered$gene_id,
+                            mart = ensembl)
+  saveRDS(kas_id_conversion, conversion_stash)
+}
+
+#find missing identifiers
+#length of the genes we were able to map 
+length(which(kas_exp_filtered$gene_id %in% kas_id_conversion$ensembl_gene_id))
+# 21676
+#Number of genes that are missing symbols = total ensemble genes we start with - length of the genes we were able to map 
+missing_sym_number <- nrow(kas_exp_filtered) - length(which(kas_exp_filtered$gene_id %in% kas_id_conversion$ensembl_gene_id)) 
+#277
+
+#check if there are duplicated ensembl ids in kas_id_conversion
+duplicate_id <- kas_id_conversion$ensembl_gene_id[which(duplicated(kas_id_conversion$ensembl_gene_id))]
+# "ENSG00000230417" "ENSG00000254876" "ENSG00000276085"
+
+#lets try and merge our new identifiers.
+filtered_data_matrix <- as.matrix(kas_exp_filtered[,5:10]) 
+rownames(filtered_data_matrix) <- kas_exp_filtered$gene_id
+kas_exp_filtered_annot <- merge(kas_id_conversion, filtered_data_matrix, by.x=1, by.y=0, all.y=TRUE)
+
+
+```
+   -_Summary_: 
+     - **21676** out of 21953 filtered genes were mapped to HGNC symbol.
+     - **277** rows have ensembl id but could not be matche with valid HUGO symbol. Within 277 rows, 200 genes have empty HGNC symbol in the `kas_exp_filtered` data frame. Thus, we need to check the other 77 genes which did not have corresponding HGNC symbol after mapping.
+
+
+
+**5. Clean the data and set the rownames of the data set to the HGNC symbols:**
+```{r message=FALSE, results=FALSE}
+#check if there are unmapped rows
+sum(kas_id_conversion$hgnc_symbol == "")
+#4695
+#find the ensembl id of missing genes (symbol is NA)
+ensembl_id_missing_gene <- kas_exp_filtered_annot$ensembl_gene_id[which(is.na(kas_exp_filtered_annot$hgnc_symbol))]
+length(ensembl_id_missing_gene) #277
+
+#map the rows with missing genes to the old symbols
+old_mapping <- merge(kas_exp[1:2], data.frame(ensembl_id_missing_gene), all.y=TRUE, by.x=1, by.y=1)
+
+#remove unmapped rows
+kas_exp_filtered_annot <- kas_exp_filtered_annot[which(kas_exp_filtered_annot$hgnc_symbol != ""),]
+
+#check if there are duplicated ensembl ids
+dup_num <- sum(duplicated(kas_exp_filtered_annot$ensembl_gene_id))
+#3
+n_occur <- data.frame(table(kas_exp_filtered_annot$ensembl_gene_id))
+kas_exp_filtered_annot[kas_exp_filtered_annot$ensembl_gene_id %in% n_occur$Var1[n_occur$Freq > 1],]
+
+#check if there are duplicated HGNC symbols
+dup_sym_num <- sum(duplicated(kas_exp_filtered_annot$hgnc_symbol))
+#10
+n_occur <- data.frame(table(kas_exp_filtered_annot$hgnc_symbol))
+kas_exp_filtered_annot[kas_exp_filtered_annot$hgnc_symbol %in% n_occur$Var1[n_occur$Freq > 1],]
+
+
+#check if multiple rows were mapped to same symbol
+length(unique(kas_exp_filtered_annot$hgnc_symbol)) #16974
+nrow(kas_exp_filtered_annot) #16984
+#10
+# Filter out SNORs that are duplicated --- SNORA50A, SNORD38B, SNORA16A, SNORA17B
+kas_exp_filtered_annot <- kas_exp_filtered_annot[which(!(kas_exp_filtered_annot$hgnc_symbol %in% c("SNORA50A", "SNORD38B", "SNORA16A", "SNORA17B"))),]
+#Check each duplicate pairs, remove novel transcripts
+kas_exp_filtered_annot <- kas_exp_filtered_annot[which(!(kas_exp_filtered_annot$ensembl_gene_id %in% c("ENSG00000268500", "ENSG00000272655", "ENSG00000258724", "ENSG00000258325","ENSG00000277027","ENSG00000281394"))),]
+
+#Check whether duplicates are resolved
+length(unique(kas_exp_filtered_annot$hgnc_symbol)) #16970
+nrow(kas_exp_filtered_annot) #16970
+
+
+#set rownames of the mapped data set to the hgnc symbols
+rownames(kas_exp_filtered_annot) <- kas_exp_filtered_annot$hgnc_symbol
+kas_exp_filtered_annot$hgnc_symbol <- NULL
+```
+ - _Summary_: 
+    - After cleaning the filtered data, we have **16970** mapped genes with unique HGNC symbols.
+
+  
+**6. Data visualization for cleaned data before normalization:**
+
+   - Boxplot:
+```{r}
+data2plot <- log2(cpm(kas_exp_filtered_annot[,2:7]))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM",
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, main = "Kasumi RNASeq Samples")
+#draw the median on each box plot
+abline(h = median(apply(data2plot, 2, median)),
+       col = "green", lwd = 0.6, lty = "dashed")
+```
+
+  - Density plot:
+```{r}
+counts_density <- apply(log2(cpm(kas_exp_filtered_annot[,2:7])), 2, density) #apply(X, MARGIN=2, FUN) The manipulation is performed on columns
+#calculate the limits across all the samples
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+  xlim <- range(c(xlim, counts_density[[i]]$x));
+  ylim <- range(c(ylim, counts_density[[i]]$y))
+    }
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+#plot the first density plot to initialize the plot
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", ylab="Smoothing density of log2-CPM", main="", cex.lab = 0.8)
+#plot each line
+for (i in 1:length(counts_density)){
+  lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+}
+#Create legend
+legend("topright", colnames(data2plot), col=cols, lty=ltys, cex=0.75, border ="blue",  text.col = "green4", merge = TRUE, bg = "gray90")
+
+#The curve shows a normal distribution with a small local peak before the true peak.
+```    
+  - MA plot for Kasumi data - comparing first two samples in dataset
+```{r}
+limma::plotMA(log2(kas_exp[,c(5,6)]), ylab="M - ratio log expression", main="Kasumi rep1 vs Kasumi rep2 - example")
+```
+
+  - MDS plot
+```{r}
+#Inspect the sample separation using a multidimenstional scaling plot or MDS plot before normalization.
+filtered_data_matrix_pre_norm <- as.matrix(kas_exp_filtered_annot[,2:7]) 
+rownames(filtered_data_matrix_pre_norm) <- kas_exp_filtered_annot$gene_id
+pre_d = DGEList(counts=filtered_data_matrix_pre_norm, group=samples$Treated_cell_type)
+plotMDS(pre_d, labels=rownames(samples), col = c("darkgreen","blue")[factor(samples$Treated_cell_type)])
+```
+
+  - Biological coefficient of Variance plot
+```{r}
+#estimate common and tagwise dispersion
+model_design <- model.matrix(~samples$Replicate
+                             + samples$Treated_cell_type+0)
+pre_d <- estimateDisp(pre_d, model_design)
+plotBCV(pre_d,col.tagwise = "black",col.common = "red",)#lower expression -> more variation; higher expression -> low var
+```
+  
+  - Mean-variance plot
+```{r}
+ #Create a visual representation of the mean-variance relationship
+plotMeanVar(pre_d, show.raw.vars = TRUE, show.tagwise.vars=TRUE, NBline=TRUE,
+            show.ave.raw.vars = TRUE,show.binned.common.disp.vars = TRUE)
+```
+
+<br>
+---
+
+
+
+
+### Apply normalization:
+**1.Applying TMM to our dataset:**
+```{r}
+#Create an edgeR container for RNASeq count data
+#use the filtered counts and make sure it is not a data.frame but is a matrix
+filtered_data_matrix <- as.matrix(kas_exp_filtered_annot[,2:7]) 
+rownames(filtered_data_matrix) <- kas_exp_filtered_annot$gene_id
+#give the defined groups that we are going to be comparing - cell type (siMM treated or siRR treated)
+d = DGEList(counts=filtered_data_matrix, group=samples$Treated_cell_type)
+#Calculate the normalization factors
+d = calcNormFactors(d)
+#get the normalized data
+normalized_counts <- cpm(d)
+```
+
+**2.Data visualization after normalization:**
+
+ - Density plot after normalization
+```{r message=FALSE, results=FALSE}
+normalized_counts_density <- apply(log2(normalized_counts), 2, density)
+xlim <- 0; ylim <- 0
+for (i in 1:length(normalized_counts_density)) {
+      xlim <- range(c(xlim, normalized_counts_density[[i]]$x));
+      ylim <- range(c(ylim, normalized_counts_density[[i]]$y))
+    }
+    cols <- rainbow(length(normalized_counts_density))
+    ltys <- rep(1, length(normalized_counts_density))
+    #plot the first density plot to initialize the plot
+    plot(normalized_counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+         ylab="Smoothing density of log2-CPM after normalization", main="", cex.lab = 0.8)
+    #plot each line
+for (i in 1:length(normalized_counts_density)) 
+    lines(normalized_counts_density[[i]], col=cols[i], lty=ltys[i])
+    #create legend
+    legend("topright", colnames(data2plot),
+           col=cols, lty=ltys, cex=0.75,
+           border ="blue",  text.col = "green4",
+           merge = TRUE, bg = "gray90")
+```
+
+
+  - MDS plot
+```{r message=FALSE, results=FALSE}
+#Inspect the sample separation using a multidimenstional scaling plot or MDS plot post normalization.
+plotMDS(d, labels=rownames(samples),
+  col = c("darkgreen","blue")[factor(samples$Treated_cell_type)])
+```
+
+
+  - Biological coefficient of Variance plot
+```{r message=FALSE, results=FALSE}
+#estimate common and tagwise dispersion
+model_design <- model.matrix(~samples$Replicate
+                             + samples$Treated_cell_type+0)
+d <- estimateDisp(d, model_design)
+plotBCV(d,col.tagwise = "black",col.common = "red",)#lower expression -> more variation; higher expression -> low var
+```
+
+
+  - Mean-variance plot
+```{r message=FALSE, results=FALSE}
+#Create a visual representation of the mean-variance relationship
+plotMeanVar(d, show.raw.vars = TRUE, show.tagwise.vars=TRUE, NBline=TRUE,
+            show.ave.raw.vars = TRUE,show.binned.common.disp.vars = TRUE)
+
+```
+  - _Interpretation_:
+   - The density plot after normalization shows normal distribution as the pre-normalized density plot.
+   - The upcurve became more overlapped and closely clustered after normalization.
+   - The MDS plot after normalization indicates the same group of replicates are more closely clustered.
+   
+<br>
+---
+
+### Final coverage:
+```{r}
+#calculate the coverage of the mapped and cleaned data:
+dim(kas_exp_filtered_annot)[1] / dim(kas_exp_filtered) * 100 # 77.30151%
+
+#Show the top rows and columns:
+knitr::kable(kas_exp_filtered_annot[1:5, 1:5], format="html")
+```
+---
+
+### Interpret, and document:
+ + What are the control and test conditions of the dataset?
+    - Control group: Kasumi-1 cells treated with siMM
+    - Testing group: Kasumi-1 cells with RUNX1/RUNX1T1 knockdown treated with siRR
+
+ + Why is the dataset of interest to you?
+   - These dataset appeals to me since the RUNX1/RUNX1T1 encodes an essential transcription factor, which involves in the initiation and maintenance of acute leukemia by affecting the alternative splicing. I have participated in a project that focused on the alternative splicing process. Kasumi-1 cell line is an intensively investigated model system of Acute myeloid leukemia with translocation. So this dataset could help scientists understand the underlying mechanism of RUNX1/RUNX1T1-associated splicing events.
+    
+ + Were there expression values that were not unique for specific genes? How did you handle these?
+
+    - The dataset were downloaded with gene symbols. And there is no duplicated ensembl ids.
+    - I updated all gene symbols with new version of HGNC symbols and set them to row names of the final data set. During the cleaning and mapping process, not all genes have matched HGNC symbols in biomart database. The newly mapped HGNC symbols have approximately 19% blanks and a few duplicates. I remove the duplicates that are SNORs(small nucleolar RNA) and also the ones that could not be found in the gene resources of HGNC symbol report.
+   
+ + Were there expression values that could not be mapped to current HUGO symbols?
+ 
+   - Yes, there were 277 missing identifers in this dataset. The proportion is about 1.2%.
+  
+ + How many outliers were removed?
+  
+   - 22292 out of 39262 were removed. These outliers include genes with low counts (17309 genes), genes with blank HGNC symbols (4695 genes), genes with invalid identifiers (277 genes), and genes with duplicates (11 genes).
+   
+ + How did you handle replicates?
+ 
+   - There are three replicates in this experiment. The number of replication trials was recorded in this samples with column name as Replicate. This number was used for normalization and visualization process.
+ 
+ + What is the final coverage of your dataset?
+ 
+    - The final coverage was calculated in the above section (Final Coverage). There were 16970 genes remained after data cleaning and mapping.
+    
+---
+
+### Reference:
+1. HUGO Gene Nomenclature Committee. (2022). BioMart help. Retrieved February 18, 2022. https://www.genenames.org/help/biomart
+
+2. HUGO Gene Nomenclature Committee. (2022). Symbol report for PINX1. Retrieved February 18, 2022 https://www.genenames.org/data/gene-symbol-report/#!/hgnc_id/HGNC:30046
+
+3. Isserlin, R. (2021). Lecture 3: Different Platforms for measuring Expression Datameasuring Expression Data. BCB420 - Computational System Biology. Retrieved February 13, 2022
+
+4. Isserlin, R. (2021). Lecture 4: Exploring the data and basics of Normalization. BCB420 - Computational System Biology. Retrieved February 10, 2022.
+
+5. Isserlin, R. (2021). Lecture 5: Data exploration and Identifier mapping. BCB420 - Computational System Biology. Retrieved February 16, 2022.
+
+6. Grinev, V.V., Barneh, F., Ilyushonak, I. M., Nakjang, S., Smink, J., van Oort, A., Clough, R., Seyani, M., McNeill, H., Reza, M., Martinez-Soria, N., Assi, S. A., Ramanouskaya, T. V., Bonifer, C., &amp; Heidenreich, O. (2021). Runx1/RUNX1T1 mediates alternative splicing and reorganises the transcriptional landscape in leukemia. *Nature News*. Retrieved February 19, 2022, from https://www.nature.com/articles/s41467-020-20848-z
+
+
