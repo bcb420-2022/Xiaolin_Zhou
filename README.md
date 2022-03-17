@@ -5,4 +5,4 @@ repository for bcb420 for Xiaolin Zhou
 2. Assignment1.nb.html: https://github.com/bcb420-2022/Xiaolin_Zhou/blob/main/Assignment1.nb.html
 3. Assignemnt1.html: https://github.com/bcb420-2022/Xiaolin_Zhou/blob/main/Assignment1.html
 4. A2_XiaolinZhou.Rmd: https://github.com/bcb420-2022/Xiaolin_Zhou/blob/main/A2_XiaolinZhou.Rmd
-5. 
+5. A2_XiaolinZhou.html: https://github.com/bcb420-2022/Xiaolin_Zhou/blob/main/A2_XiaolinZhou.html
